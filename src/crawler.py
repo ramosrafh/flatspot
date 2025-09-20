@@ -1,250 +1,216 @@
 import requests
 import json
 import time
+import yaml
 from datetime import datetime
 from loguru import logger
-from random import randint
+from pathlib import Path
 import os
 
-BAIRROS = [
-    'tres-marias',
-    'centro',
-    'aristocrata',
-    'bom-jesus',
-    'pedro-moro',
-    'ouro-fino',
-    'sao-pedro',
-    'sao-domingos',
-    'silveira-da-motta',
-    'braga'
-]
+# Carrega configuração do YAML
+def load_config(config_file='../config.yaml'):
+    with open(config_file, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f)
 
-today = datetime.now().strftime("%d-%m-%Y")
-
-directory = f"results/{today}"
-os.makedirs(directory, exist_ok=True)
-
-
-headers = {
+# Headers para requisições
+HEADERS = {
     'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:141.0) Gecko/20100101 Firefox/141.0',
     'Accept': '*/*',
     'Accept-Language': 'en-US,en;q=0.5',
-    'Referer': 'https://www.chavesnamao.com.br/apartamentos-a-venda/pr-sao-jose-dos-pinhais/',
+    'Referer': 'https://www.chavesnamao.com.br/apartamentos-a-venda/',
     'Sec-Fetch-Dest': 'empty',
     'Sec-Fetch-Mode': 'cors',
     'Sec-Fetch-Site': 'same-origin',
-    'Cookie': 'PHPSESSID=qos6s2tp3kdu9c7dip7rc5p043; cnm_loc=%7B%22id_cidade%22%3A%226015%22%2C%22cidade%22%3A%22Curitiba%22%2C%22uf_estado%22%3A%22PR%22%2C%22latitude%22%3A%22-25.432957%22%2C%22longitude%22%3A%22-49.271847%22%2C%22id_cidade_landing_page%22%3A%226015%22%2C%22nome_cidade_landing_page%22%3A%22Curitiba%22%2C%22url_cidade_landing_page%22%3A%22curitiba%22%2C%22uf_cidade_landing_page%22%3A%22PR%22%7D'
 }
 
-def save_bairro_batch(bairro, properties):
+def save_batch(estado, cidade, bairro, properties):
+    """Salva os dados coletados na estrutura ../data/raw/chavesnamao/"""
     if not properties:
         return None
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"results/{today}/imoveis_{bairro}_{timestamp}.json"
+    # Cria estrutura de diretórios
+    today = datetime.now().strftime("%Y-%m-%d")
+    base_dir = Path(f"../data/raw/chavesnamao/dt={today}")
+    base_dir.mkdir(parents=True, exist_ok=True)
 
+    # Nome do arquivo
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = base_dir / f"{estado}_{cidade}_{bairro}_{timestamp}.json"
+
+    # Estrutura de dados mantendo o formato original
     data = {
+        'estado': estado,
+        'cidade': cidade,
         'bairro': bairro,
         'total_collected': len(properties),
         'collection_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'search_params': {
             'level1': 'apartamentos-a-venda',
-            'level2': 'pr-sao-jose-dos-pinhais',
+            'level2': f'{estado}-{cidade}',
             'level3': bairro
         },
         'properties': properties,
         'crawled_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
 
+    # Salva arquivo
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-    logger.success(f"Batch salvo: {filename}")
+    logger.success(f"Salvo: {filename}")
     return filename
 
-def scrape_bairro(bairro):
+def scrape_bairro(estado, cidade, bairro):
+    """Coleta dados de um bairro específico"""
     url = "https://www.chavesnamao.com.br/api/realestate/listing/items/"
 
-    base_params = {
+    # Parâmetros da API
+    params = {
         'level1': 'apartamentos-a-venda',
-        'level2': 'pr-sao-jose-dos-pinhais',
+        'level2': f"{estado}-{cidade}",
         'level3': bairro
     }
 
-    logger.info(f"COLETANDO BAIRRO: {bairro.upper().replace('-', ' ')}")
-    logger.info("-" * 50)
-
-    bairro_properties = []
+    all_items = []
     page = 1
 
     try:
-        response = requests.get(url, headers=headers, params=base_params)
-
+        # Primeira página
+        response = requests.get(url, headers=HEADERS, params=params)
         if response.status_code != 200:
-            logger.error(f"Erro HTTP {response.status_code} para {bairro}")
+            logger.error(f"Erro HTTP {response.status_code}")
             return []
 
         data = response.json()
         items = [item for item in data.get('items', []) if not item.get('pagination')]
 
         if not items:
-            logger.warning(f"Nenhum imovel encontrado em {bairro}")
+            logger.warning(f"Nenhum imóvel encontrado")
             return []
 
-        bairro_properties.extend(items)
+        all_items.extend(items)
 
+        # Metadata
         metadata = data.get('metadata', {})
-        total_results = metadata.get('realResults', 0)
         total_pages = metadata.get('totalPages', 1)
+        total_results = metadata.get('realResults', 0)
 
-        logger.info(f"{bairro}: {total_results} imoveis em {total_pages} paginas")
-        logger.info(f"Pagina {page}/{total_pages} - {len(items)} itens")
+        logger.info(f"Encontrados: {total_results} imóveis em {total_pages} páginas")
 
+        # Páginas seguintes
         for page in range(2, total_pages + 1):
-            params = base_params.copy()
             params['pg'] = page
 
-            response = requests.get(url, headers=headers, params=params)
-
+            response = requests.get(url, headers=HEADERS, params=params)
             if response.status_code != 200:
-                logger.error(f"Erro HTTP {response.status_code} na pagina {page} de {bairro}")
+                logger.error(f"Erro na página {page}")
                 break
 
             data = response.json()
             items = [item for item in data.get('items', []) if not item.get('pagination')]
 
-            if len(items) == 0:
-                logger.warning(f"Pagina {page} vazia em {bairro}, finalizando")
+            if not items:
                 break
 
-            bairro_properties.extend(items)
-            logger.info(f"Pagina {page}/{total_pages} - {len(items)} itens")
+            all_items.extend(items)
+            logger.info(f"  Página {page}/{total_pages} - {len(items)} itens")
 
-            if total_results > 0 and len(bairro_properties) >= total_results:
-                break
+            time.sleep(1)  # Rate limiting
 
-            time.sleep(randint(1,2))
+        logger.success(f"Total coletado: {len(all_items)} imóveis")
 
-        logger.success(f"{bairro}: coletados {len(bairro_properties)} imoveis")
+        # Adiciona metadados em cada item (opcional, mantém compatibilidade)
+        for item in all_items:
+            item['meta_estado'] = estado
+            item['meta_cidade'] = cidade
+            item['meta_bairro'] = bairro
 
-        for prop in bairro_properties:
-            prop['bairro_coleta'] = bairro
+        # Salva o batch
+        save_batch(estado, cidade, bairro, all_items)
 
-        save_bairro_batch(bairro, bairro_properties)
-
-        return bairro_properties
+        return all_items
 
     except Exception as e:
-        logger.error(f"Erro coletando {bairro}: {e}")
-        return bairro_properties
+        logger.error(f"Erro: {e}")
+        return []
 
-def scrape_all_bairros():
-    logger.info("INICIANDO COLETA DE TODOS OS BAIRROS")
+def main():
+    """Função principal"""
     logger.info("=" * 60)
-    logger.info(f"Bairros: {', '.join([b.replace('-', ' ').title() for b in BAIRROS])}")
-
-    all_properties = []
-    bairros_summary = {}
-
-    for i, bairro in enumerate(BAIRROS, 1):
-        logger.info(f"[{i}/{len(BAIRROS)}]")
-
-        bairro_properties = scrape_bairro(bairro)
-
-        if bairro_properties:
-            all_properties.extend(bairro_properties)
-            bairros_summary[bairro] = len(bairro_properties)
-        else:
-            bairros_summary[bairro] = 0
-
-        if i < len(BAIRROS):
-            time.sleep(1)
-
-    return all_properties, bairros_summary
-
-def save_properties(properties, bairros_summary):
-    if not properties:
-        logger.error("Nenhum imovel para salvar")
-        return
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"results/imoveis_sao_jose_pinhais_{timestamp}.json"
-
-    data = {
-        'total_collected': len(properties),
-        'collection_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        'search_params': {
-            'level1': 'apartamentos-a-venda',
-            'level2': 'pr-sao-jose-dos-pinhais',
-            'bairros': BAIRROS
-        },
-        'bairros_summary': bairros_summary,
-        'properties': properties,
-        'crawled_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    logger.success(f"Arquivo salvo: {filename}")
-    return filename
-
-def show_statistics(properties, bairros_summary):
-    if not properties:
-        return
-
-    logger.info("=" * 60)
-    logger.info("RESUMO FINAL")
+    logger.info("INICIANDO COLETA CHAVES NA MÃO")
     logger.info("=" * 60)
 
-    logger.info("IMOVEIS POR BAIRRO:")
-    logger.info("-" * 40)
-    total_bairros_com_imoveis = 0
-    for bairro, count in bairros_summary.items():
-        status = "OK" if count > 0 else "VAZIO"
-        if count > 0:
-            total_bairros_com_imoveis += 1
-        logger.info(f"{status} {bairro.replace('-', ' ').title()}: {count} imoveis")
+    # Carrega configuração
+    config = load_config()
 
-    logger.info(f"Bairros com imoveis: {total_bairros_com_imoveis}/{len(BAIRROS)}")
-
-    logger.info("ESTATISTICAS DE PRECOS:")
-    logger.info("-" * 40)
-    prices = [p.get('prices', {}).get('rawPrice') for p in properties if p.get('prices', {}).get('rawPrice')]
-    if prices:
-        logger.info(f"Menor preco: R$ {min(prices):,.2f}")
-        logger.info(f"Maior preco: R$ {max(prices):,.2f}")
-        logger.info(f"Preco medio: R$ {sum(prices)/len(prices):,.2f}")
-        logger.info(f"Total de imoveis com preco: {len(prices)}")
-
-    logger.info("DISTRIBUICAO DE QUARTOS:")
-    logger.info("-" * 40)
-    bedrooms = [p.get('properties', {}).get('bedrooms') for p in properties if p.get('properties', {}).get('bedrooms')]
-    if bedrooms:
-        bedroom_counts = {}
-        for bed in bedrooms:
-            bedroom_counts[bed] = bedroom_counts.get(bed, 0) + 1
-
-        for bed_count in sorted(bedroom_counts.keys()):
-            logger.info(f"{bed_count} quarto(s): {bedroom_counts[bed_count]} imoveis")
-
-    logger.success(f"TOTAL GERAL: {len(properties)} imoveis coletados")
-
-if __name__ == "__main__":
+    # Contadores totais
+    total_collected = 0
     start_time = time.time()
 
-    properties, bairros_summary = scrape_all_bairros()
+    # Calcula totais para acompanhamento
+    total_estados = len(config)
+    total_cidades = 0
+    total_bairros = 0
 
-    end_time = time.time()
-    duration = end_time - start_time
+    for estado, cidades in config.items():
+        total_cidades += len(cidades)
+        for cidade, bairros in cidades.items():
+            total_bairros += len(bairros)
 
-    if properties:
-        logger.success("COLETA FINALIZADA!")
-        logger.info(f"Tempo total: {duration/60:.1f} minutos")
+    logger.info(f"Total a processar: {total_estados} estados, {total_cidades} cidades, {total_bairros} bairros")
+    logger.info("=" * 60)
 
-        filename = save_properties(properties, bairros_summary)
+    estado_num = 0
+    cidade_global = 0
+    bairro_global = 0
 
-        show_statistics(properties, bairros_summary)
+    # Itera por estados
+    for estado, cidades in config.items():
+        estado_num += 1
+        logger.info(f"\n[ESTADO {estado_num}/{total_estados}] {estado.upper()}")
+        logger.info("-" * 40)
 
-    else:
-        logger.error("Nenhum imovel coletado em nenhum bairro")
+        cidade_num = 0
+        # Itera por cidades
+        for cidade, bairros in cidades.items():
+            cidade_num += 1
+            cidade_global += 1
+            logger.info(f"\n[CIDADE {cidade_global}/{total_cidades}] {cidade.upper()} ({cidade_num}/{len(cidades)} no estado)")
+            logger.info(f"Bairros nesta cidade: {len(bairros)}")
+
+            bairro_num = 0
+            # Itera por bairros
+            for bairro in bairros:
+                bairro_num += 1
+                bairro_global += 1
+
+                logger.info(f"\n[BAIRRO {bairro_global}/{total_bairros}] {bairro.upper()} ({bairro_num}/{len(bairros)} na cidade)")
+
+                properties = scrape_bairro(estado, cidade, bairro)
+                total_collected += len(properties)
+
+                if properties:
+                    logger.info(f"✓ {len(properties)} imóveis coletados")
+                else:
+                    logger.info(f"✗ Nenhum imóvel encontrado")
+
+                # Mostra progresso
+                faltam_bairros = total_bairros - bairro_global
+                if faltam_bairros > 0:
+                    logger.info(f"→ Faltam {faltam_bairros} bairros")
+
+                time.sleep(2)  # Rate limiting entre bairros
+
+    # Estatísticas finais
+    duration = (time.time() - start_time) / 60
+    logger.info("\n" + "=" * 60)
+    logger.success(f"COLETA FINALIZADA!")
+    logger.info(f"Estados processados: {total_estados}")
+    logger.info(f"Cidades processadas: {total_cidades}")
+    logger.info(f"Bairros processados: {total_bairros}")
+    logger.info(f"Total de imóveis coletados: {total_collected}")
+    logger.info(f"Tempo total: {duration:.1f} minutos")
+    logger.info("=" * 60)
+
+if __name__ == "__main__":
+    main()

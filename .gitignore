@@ -1,2 +1,5 @@
 results/
 .env
+backup/
+data/
+.rope*
